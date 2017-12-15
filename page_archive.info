@@ -1,0 +1,9 @@
+name = Page Archive
+description = "Page Archiving System"
+package = Archiving
+core = 7.x
+dependencies[] = redirect
+dependencies[] = pathauto
+dependencies[] = entity
+
+configure = admin/config/content/archive

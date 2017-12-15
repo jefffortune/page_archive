@@ -1,0 +1,9 @@
+{
+  "name": "Tombras",
+  "description": "Page Archive dependencies.",
+  "type": "library",
+  "require": {
+    "paquettg/php-html-parser": "*",
+    "ezyang/htmlpurifier": "*"
+  }
+}

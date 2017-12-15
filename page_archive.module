@@ -1,0 +1,485 @@
+<?php
+module_load_include('inc', 'page_archive', 'src/queries/schedule');
+module_load_include('inc', 'page_archive', 'src/queries/failures');
+module_load_include('php', 'page_archive', 'src/archive_entity/ScheduleItemBasicController');
+module_load_include('inc', 'page_archive', 'src/archive_entity/archive_entity');
+module_load_include('inc', 'page_archive', 'src/classes/Archive');
+
+
+/**
+ *  Cron
+ */
+/**
+ * This hook will establish a elysia cron job if any implantation has been established by
+ * the hook_archive_elysia_schedule
+ * Implements hook_cronapi().
+ */
+function page_archive_cronapi($op, $job = NULL) {
+  // Check if any over rides have been made in hook_archive_cron_schedule
+  $module_implements = module_implements('archive_elysia_schedule');
+  if (!empty($module_implements)) {
+    // Rule for elysia cron to use.
+    $rule = '* * * * *';
+    foreach ($module_implements as $module) {
+      $return_value = module_invoke($module, 'archive_elysia_schedule', $rule);
+      if ($return_value !== null) {
+        $rule = $return_value;
+      }
+    }
+    $items['page_archive'] = [
+      'description' => 'Archive scheduled content.',
+      'rule' => $rule,
+      'callback' => 'page_archive_scheduler'
+    ];
+
+    return $items;
+  }
+
+}
+
+/**
+ * This hook will setup a cron job if the any implementation has been found from
+ * archive_cron_schedule hook
+ * Implements hook_cron().
+ */
+function page_archive_cron(){
+  // Default to an hourly interval.
+
+  $module_implements = module_implements('page_archive_cron_schedule');
+  if (!empty($module_implements)) {
+    // Interval for when cron should run this task.
+    $interval = variable_get('archive_cron_interval', 60 * 60);
+    foreach ($module_implements as $module) {
+      $return_value = module_invoke($module, 'archive_cron_schedule', $interval);
+      if ($return_value !== null) {
+        $interval = $return_value;
+      }
+    }
+    if (time() >= variable_get('page_archive_cron_next_execution', 0)) {
+      //Pass to page archive scheduler to run archive process.
+      page_archive_scheduler();
+      variable_set('page_archive_cron_next_execution', time() + $interval);
+    }
+  }
+}
+
+/**
+ * Create Archive object to handle the batching and setting of creating the Archive nodes from the CSV
+ * or internal pages in the scheduled database.
+ */
+function page_archive_scheduler() {
+  $archive = new \Drupal\page_archive\Archive();
+  $archive->archive();
+}
+
+/**
+ *  Grab all forms that are not Archive Node and add a tab in additional
+ *  information tab group. In this tab a button will be added to control adding
+ *  and removing nodes from the archive schedule.
+ *
+ * Implements hook_form_alter().
+ */
+function page_archive_form_alter(&$form, &$form_state, $form_id) {
+
+  if (isset($form['#bundle']) && $form['#bundle'] == 'archive_page') {
+    $form['#submit'][] = "_update_archive_entity_fields";
+    return $form;
+  }
+  // Set form group in the additional content section.
+  if (isset($form_state['node']->nid) && $form_state['node']->type != 'archive_page') {
+    // set Node ID
+    $nid = $form_state['node']->nid;
+    // Add archive tab to node edit form additional setting at the bottom of the from screen.
+    $form['archive'] = [
+      '#type' => 'fieldset',
+      '#title' => t('Archive Content'),
+      '#group' => 'additional_settings',
+      '#collapsed' => TRUE,
+      '#collapsible' => TRUE,
+      '#weight' => 100,
+      '#access' => 'add node_to_schedule',
+    ];
+    // HTML Sting to introduce users to the archive submit button
+    $intro = '
+      <h2>Archiving this content:</h2>
+      <ul>
+        <li>The content is archived and will not be editable.</li>
+        <li>When content is archived this content page will be deleted from the system.</li>
+        <li>Revision notes will be stored on the archived content node.</li>
+      </ul>
+    ';
+    // Place the intro markup on the archive fieldset
+    $form['archive']['intro'] = [
+      '#type' => 'item',
+      '#markup' => $intro,
+    ];
+    // check to see if the nid is in the table
+    if (page_archive_nid_lookup_exists_schedule($nid)) {
+      // If so let make the button value and callback relate to removing the entry.
+      $button_value = "Remove from Archive Queue";
+      $callback = ["remove_node_from_schedule"];
+    } else {
+      // Else we are going to make the button value and call back relate to creating the entry.
+      $button_value = "Archive Content";
+      $callback = ["entity_archive_submit"];
+    }
+    // Attach the archive submit button with a custom submit handler.
+    $form['archive']['submit'] = [
+      '#type' => 'submit',
+      '#value' => $button_value,
+      '#submit' => $callback,
+      '#limit_validation_errors' => [],
+    ];
+  }
+}
+
+/**
+ * Submit handler that will remove the entity and database entries of nodes that
+ * have been scheduled for Archiving
+ *
+ * @param $form
+ * @param $form_state
+ *
+ * @return mixed
+ */
+function remove_node_from_schedule(&$form, &$form_state) {
+  $n = $form_state['node']->nid;
+  $entity_id = page_archive_nid_lookup_entity_id_schedule($n);
+  $schedule_id = page_archive_nid_lookup_exists_schedule($n);
+  $delete = page_archive_delete_schedule($schedule_id);
+
+  if ($delete) {
+    $msg = $form_state['node']->title . " has been removed from archive queue";
+    drupal_set_message(t($msg));
+    entity_get_controller('archive_entity')->delete(entity_load_single('archive_entity', $entity_id));
+  } else {
+    $msg = $form_state['node']->title . " could not be removed from the archive queue.";
+    drupal_set_message(t($msg), 'error');
+  }
+  return $form;
+}
+
+/**
+ * Submit handler for creating archive_entity and scheduling a node to be archived.
+ * @param $form
+ * @param $form_state
+ * @return mixed
+ */
+function entity_archive_submit(&$form, &$form_state) {
+  global $user; // current user settings
+  global $base_url;
+  // Create the archive entity from controller.
+  $new_schedule = entity_get_controller('archive_entity')->create();
+  // Add the common values to the entity.
+  $new_schedule->title = $form_state['node']->title;
+  $new_schedule->field_nid = $form_state['node']->nid;
+  $new_schedule->field_archive_selectors = variable_get("archive_css_selectors", '.region-content');
+  $new_schedule->field_archive_images = 1;
+  $new_schedule->field_archive_url = $base_url . '/node/' . $form_state['node']->nid;
+  // Get any term references that have been add to the archive content type.
+  $referenced_terms = page_archive_get_taxonomy_reference_from_archive_page();
+  foreach ($referenced_terms as $key =>$referenced_term) {
+    if (!empty($form_state['node']->{$key})) {
+      $new_schedule->{$key} = $form_state['node']->{$key};
+    }
+  }
+  $module_implements = module_implements('archive_presave_internal_entity');
+
+  if (!empty($module_implements)) {
+    foreach ($module_implements as $module) {
+      $return_value = module_invoke($module, 'archive_presave_internal_entity', $new_schedule);
+      if ($return_value !== null) {
+        $new_schedule = $return_value;
+      }
+    }
+  }
+
+  $new_schedule = entity_get_controller('archive_entity')->save($new_schedule);
+
+  if (isset($form_state['values']['path'])) {
+    if (isset($form_state['values']['path']['original'])) {
+      $new_schedule->field_archive_url = $base_url . '/' . $form_state['values']['path']['original']['alias'];
+    } else {
+      $new_schedule->field_archive_url = $base_url . '/' . $form_state['values']['path']['source'];
+    }
+  }
+  // save the new entity
+  $new_schedule = entity_get_controller('archive_entity')->save($new_schedule);
+  // prep data for database insert
+  $data = [
+    'entity_id' => $new_schedule->id,
+    'nid' => $form_state['node']->nid,
+    'uid' => $user->uid,
+    'created' => (int)REQUEST_TIME,
+    'error' => 0,
+  ];
+  // insert data into
+  $scheduled = page_archive_insert_scheduler($data);
+
+  if ($scheduled) {
+    drupal_set_message('This content is now scheduled to be archived.');
+  } else {
+    $message = 'Nid -' . $form_state['node']->nid . ': failed to archive - location scheduler';
+    watchdog('Page Archive', $message, null, WATCHDOG_ERROR);
+    drupal_set_message('Cannot handle your request at this time. If the problem keeps occurring please contact webmaster.', 'error');
+  }
+  return $form;
+}
+
+/**
+ * Adding any field that gets added to the node archive page to the archive entity.
+ * @param $form
+ * @param $form_state
+ */
+function _update_archive_entity_fields($form, $form_state) {
+  $data_archive_entity_instances = field_info_instances("archive_entity", 'archive_item');
+  $data_instances = field_info_instances("node", 'archive_page');
+
+  foreach ($data_instances as $key => $data) {
+    if (!array_key_exists($key, $data_archive_entity_instances)) {
+      if (field_info_field($key)['type'] == 'taxonomy_term_reference') {
+        field_create_instance(
+          [
+            'field_name' => $key,
+            'label' => $data['label'],
+            'required' => $data['required'],
+            'widget' => $data['widget'],
+            'entity_type' => 'archive_entity',
+            'bundle' => 'archive_item'
+          ]
+        );
+      }
+    }
+  }
+}
+
+
+/**
+ * When an instance gets deleted from the node archive page then we need remove it from the archive entity.
+ * Implements hook_field_delete_instance().
+ */
+function page_archive_field_delete_instance($instance) {
+  if ($instance['bundle'] == 'archive_page') {
+    if (field_info_field($instance['field_name'])['type'] == 'taxonomy_term_reference') {
+      if ($entity_instance = field_info_instance('archive_entity', $instance['field_name'], 'archive_item')) {
+        field_delete_instance($entity_instance);
+      }
+    }
+  }
+}
+
+/**
+ * Create a entity that will help process and manage are archive processes.
+ * Implements hook_entity_info().
+ */
+function page_archive_entity_info() {
+  $info['archive_entity'] = archive_entity_info();
+  return $info;
+}
+
+/**
+ * Menus
+ */
+
+/**
+ * Implements hook_permission().
+ */
+function page_archive_permission() {
+  return [
+    "manage archive_entity entity" => [
+      'title' => t('View Archive Entities Management'),
+      'description' => t('Allows users to manage and customize entities including deleting and making new fields'),
+      'restrict access' => TRUE
+    ],
+    "create archive_entity entity" => [
+      'title' => t("Archive Entity Management"),
+      'description' => t("Create, edit and delete archive entities."),
+      'restrict access' => TRUE,
+    ],
+    "add node_to_schedule" => [
+      'title' => t('Add node from edit screen'),
+      'description' => t('Allows users to add the node to the archive schedule from the page edit screen.'),
+      'restrict access' => TRUE
+    ],
+    "view overview archive_pages" => [
+      'title' => t('View Schedule Overview'),
+      'description' => t('Allows users access to view schedule and failures pages'),
+    ],
+    'administer page_archive' => [
+      'title' => t('Administer Page Archive configurations'),
+      'description' => t('Configure global settings for the page archive module.'),
+      'restrict access' => TRUE,
+    ]
+  ];
+
+}
+
+/**
+ * Add archive as a child to content in the admin menu.
+ * Form can be found in src/forms/admin.form.inc.
+ *
+ * Must have admin access to view
+ *
+ * Implements hook_menu()
+ *
+ * @return mixed
+ */
+
+function page_archive_menu() {
+  module_load_include('inc', 'page_archive', 'src/archive_entity/archive_entity.paths');
+
+  $items = archive_entity_menu();
+
+  $items['admin/config/content/archive'] = [
+    'title' => t('Archiving Content'),
+    'description' => t('Upload CSV and configure Archive settings.'),
+    'position' => 'left',
+    'file' => 'src/forms/page_archive_admin.inc',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => ['page_archive_admin_csv_upload'],
+    'access arguments' => ['administer page_archive'],
+  ];
+
+  $items['admin/config/content/archive/upload'] = [
+    'title' => t('Upload CSV'),
+    'type' => MENU_DEFAULT_LOCAL_TASK,
+    'weight' => -10,
+  ];
+
+  $items['admin/config/content/archive/settings'] = [
+    'title' => t('Settings'),
+    'type' => MENU_LOCAL_TASK,
+    'file' => 'src/forms/page_archive_admin_settings.inc',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => ['page_archive_admin_settings'],
+    'access arguments' => ['administer page_archive'],
+  ];
+
+  $items['admin/archive'] = [
+    'title' => t('Archive'),
+    'page callback' => 'system_admin_menu_block_page',
+    'file' => 'system.admin.inc',
+    'file path' => drupal_get_path('module', 'system'),
+    'access arguments' => ['view overview archive_pages'],
+  ];
+
+
+  $items['admin/archive/view-schedule'] = [
+    'title' => t('Manage Schedule'),
+    'type' => MENU_LOCAL_TASK,
+    'file' => 'src/forms/page_archive_view_schedule.inc',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => ['page_archive_view_schedule'],
+    'access arguments' => ['view overview archive_pages'],
+    'weight' => 1
+  ];
+
+  $items['admin/archive/view-failures'] = [
+    'title' => t('Manage Failures'),
+    'type' => MENU_LOCAL_TASK,
+    'file' => 'src/forms/admin_failures.inc',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => ['page_archive_admin_view_failures'],
+    'access arguments' => ['view overview archive_pages'],
+    'weight' => 2,
+  ];
+
+
+  return $items;
+}
+
+
+/**
+ * This exposes the "extra fields" (usually properties that can be configured
+ * as if they were fields) of the entity as pseudo-fields
+ * so that they get handled by the Entity and Field core functionality.
+ * Node titles get treated in a similar manner.
+ *
+ * Implements hook_field_extra_fields().
+ *
+ */
+function page_archive_field_extra_fields() {
+  // instance array will hold the filed instance we will attach to the archive node.
+
+  $form_elements = [
+    'archive_title' => [
+      'label' => t('Title'),
+      'description' => t('Title of Archive Page.'),
+      'required' => TRUE,
+      'weight' => -5,
+      'type' => 'text',
+    ],
+    'field_archive_url' => [
+      'label' => t('URL'),
+      'description' => t('The full url of the page that is being archive.'),
+      'required' => TRUE,
+      'weight' => -4,
+      'type' => 'text',
+    ],
+    'field_archive_selectors' => [
+      'label' => t('CSS Selector'),
+      'description' => t('Comma separated list of css sector containers that are going to be imported.'),
+      'required' => TRUE,
+      'weight' => -3,
+      'type' => 'text',
+    ],
+    'field_archive_description' => [
+      'label' => t('Description'),
+      'description' => t('Description of page used if metatags module is enabled.'),
+      'required' => TRUE,
+      'weight' => -2,
+      'type' => 'text',
+    ],
+    'field_archive_nid' => [
+      'label' => 'field_nid',
+      'cardinality' => 1,
+      'type' => 'number_integer',
+    ],
+    'field_archive_images' => [
+      'label' => 'Images',
+      'cardinality' => 1,
+      'type' => 'checkbox',
+    ]
+  ];
+
+  // Since we have only one bundle type, we'll just provide the extra_field for it.
+  $extra_fields['archive_entity']['form'] = $form_elements;
+
+  return $extra_fields;
+}
+
+/**
+ * On delete we want to make sure we remove any failures or scheduled entities from the respective tables.
+ * Implements hook_entity_delete().
+ */
+function page_archive_entity_delete($entity, $type) {
+  if ($type === "archive_entity") {
+    if (page_archive_failure_record_exist($entity->id)) {
+      page_archive_delete_failure($entity->id);
+    }
+
+    if (page_archive_record_exist($entity->id)) {
+      page_archive_delete_schedule(page_archive_lookup_schedule_id_by_entity_id($entity->id));
+    }
+  }
+}
+
+/**
+ * Get taxonomy reference fields that are on archive page node type.
+ * @return array
+ */
+function page_archive_get_taxonomy_reference_from_archive_page() {
+  // load all field instances from teh archive page
+  $data_instances = field_info_instances("node", 'archive_page');
+  // storage for term fields
+  $taxonomy_term_fields = [];
+  // loop through all data instances
+  foreach ($data_instances as $key => $data_instance) {
+    // If the field type is a taxonomy term then add it to the references.
+    if (field_info_field($key)['type'] == 'taxonomy_term_reference') {
+      $taxonomy_term_fields[$key] = field_info_field($key)['settings']['allowed_values'][0]['vocabulary'];
+    }
+  }
+
+  return $taxonomy_term_fields;
+}

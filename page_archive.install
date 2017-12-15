@@ -1,0 +1,262 @@
+<?php
+
+function page_archive_schema() {
+
+  $schema['page_archive_scheduled'] = [
+    'fields' => [
+      'schedule_id' => [
+        'description' => 'The primary key for archives',
+        'type' => 'serial',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ],
+      'entity_id' => [
+        'description' => 'The scheduled item entity id number',
+        'type' => 'int',
+        'length' => 10,
+        'unsigned' => TRUE,
+        'default' => 0,
+      ],
+      'nid' => [
+        'description' => 'Node ID',
+        'type' => 'int',
+        'length' => 10,
+        'unsigned' => TRUE,
+        'not null' => FALSE,
+        'default' => 0,
+      ],
+      'uid' => [
+        'description' => 'User id',
+        'type' => 'int',
+        'length' => 10,
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+      ],
+      'created' => [
+        'description' => 'The Unix timestamp when the entry was created.',
+        'type' => 'int',
+        'not null' => TRUE,
+        'default' => 0,
+      ],
+      'error' => [
+        'description' => 'Boolean indicating whether a error occurred.',
+        'type' => 'int',
+        'not null' => FALSE,
+        'default' => 0,
+        'size' => 'tiny',
+      ],
+    ],
+    'unique keys' => [
+      'schedule_id' => ['schedule_id'],
+      'entity_id' => ['entity_id'],
+    ],
+    'primary key' => ['schedule_id'],
+  ];
+
+  $schema['page_archive_failures'] = [
+    'fields' => [
+      'entity_id' => [
+        'description' => 'The scheduled item entity id number',
+        'type' => 'int',
+        'length' => 10,
+        'unsigned' => TRUE,
+        'default' => 0,
+      ],
+      'nid' => [
+        'description' => 'Node Id',
+        'type' => 'int',
+        'length' => 10,
+        'unsigned' => TRUE,
+        'default' => 0,
+        'not null' => FALSE,
+      ],
+      'uid' => [
+        'description' => 'User id',
+        'type' => 'int',
+        'length' => 10,
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+      ],
+      'created' => [
+        'description' => 'The Unix timestamp when the entry was created.',
+        'type' => 'int',
+        'not null' => TRUE,
+        'default' => 0,
+      ],
+      'error' => [
+        'description' => 'Boolean indicating whether a error occurred.',
+        'type' => 'int',
+        'not null' => FALSE,
+        'default' => 0,
+        'size' => 'tiny',
+      ],
+    ],
+    'unique keys' => [
+      'entity_id' => ['entity_id'],
+      'nid' => ['nid'],
+    ],
+    'primary key' => ['entity_id'],
+  ];
+
+
+  $schema['page_archive_entity'] = [
+    'description' => 'The base table for archive item entity.',
+    'fields' => [
+      'id' => [
+        'description' => 'Primary key of the archive item entity.',
+        'type' => 'serial',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ],
+      'bundle_type' => [
+        'description' => 'The bundle type',
+        'type' => 'text',
+        'size' => 'medium',
+        'not null' => TRUE,
+      ],
+      'title' => [
+        'description' => 'A description of the item',
+        'type' => 'varchar',
+        'length' => 255,
+        'not null' => TRUE,
+        'default' => '',
+      ],
+      'field_archive_url' => [
+        'description' => 'URL to be parsed',
+        'type' => 'text',
+        'size' => 'medium',
+        'not null' => TRUE,
+      ],
+      'field_archive_description' => [
+        'description' => 'Description of the page being archived.',
+        'type' => 'text',
+        'size' => 'medium',
+        'not null' => TRUE,
+      ],
+      'field_archive_selectors' => [
+        'description' => 'CSS Selector for archiving',
+        'type' => 'varchar',
+        'length' => 255,
+        'not null' => TRUE,
+        'default' => '',
+      ],
+      'field_archive_images' => [
+        'description' => 'If a archive has failed',
+        'type' => 'int',
+        'size' => 'tiny',
+        'not null' => FALSE,
+        'default' => 0
+      ],
+      'field_archive_success' => [
+        'description' => 'If a archive has successfully ran',
+        'type' => 'int',
+        'size' => 'tiny',
+        'not null' => TRUE,
+        'default' => 0
+      ],
+      'field_archive_failed' => [
+        'description' => 'If a archive has failed',
+        'type' => 'int',
+        'size' => 'tiny',
+        'not null' => TRUE,
+        'default' => 0
+      ],
+      'field_nid' => [
+        'description' => 'Store the node ID of target or archived entity',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => FALSE,
+        'default' => NULL,
+      ],
+      'created' => [
+        'description' => 'The Unix timestamp of the entity creation time.',
+        'type' => 'int',
+        'not null' => TRUE,
+        'default' => 0,
+      ],
+    ],
+    'primary key' => ['id'],
+  ];
+
+  return $schema;
+}
+
+/**
+ * Implements hook_install().
+ */
+function page_archive_install() {
+  if (!node_type_load('archive_page')) {
+    _create_archive_page_node_type();
+  }
+
+}
+
+/**
+ * This method will create the archive content type.
+ */
+function _create_archive_page_node_type() {
+  // prepare the content type for basic content type of bundle archive
+  $content_type = [
+    'type' => 'archive_page',
+    'name' => t('Archive Page'),
+    'description' => t('Used to create a archived page by the archive module'),
+    'title_label' => t('Archive Title'),
+    'base' => 'node_content',
+    'custom' => TRUE,
+  ];
+  // create the node
+  $node_type = node_type_set_defaults($content_type);
+  // save the new node type
+  node_type_save($node_type);
+  // build the fields
+  $fields = [
+    'archive_body' => [
+      'field_name' => 'archive_body',
+      'type' => 'text_long',
+      'cardinality' => 1,
+    ],
+    'archive_storage' => [
+      'field_name' => 'archive_storage',
+      'type' => 'text_long',
+      'cardinality' => 1,
+    ],
+  ];
+
+  // loop through fields array and add fields to DB
+  foreach ($fields as $field) {
+    if (!field_info_field($field['field_name'])) {
+      field_create_field($field);
+    }
+  }
+
+  // instance array will hold the filed instance we will attach to the archive node.
+  $instances = [
+    'archive_body' => [
+      'field_name' => 'archive_body',
+      'label' => t('Archive Body'),
+      'required' => TRUE,
+      'widget' => [
+        'type' => 'text_textarea',
+      ],
+    ],
+    'archive_storage' => [
+      'field_name' => 'archive_storage',
+      'label' => t('Archive Storage'),
+      'required' => TRUE,
+      'widget' => [
+        'type' => 'text_textarea',
+      ],
+    ]
+  ];
+
+  // loop through the instances and basic config info and then attach the instance to the archive node.
+  foreach ($instances as $instance) {
+    $instance['entity_type'] = 'node';
+    $instance['bundle'] = 'archive_page';
+    field_create_instance($instance);
+  }
+
+}
+
